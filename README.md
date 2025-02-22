@@ -2,7 +2,7 @@
 [![Patreon-Button](https://raw.githubusercontent.com/Lyall/FF7RebirthFix/refs/heads/master/.github/Patreon-Button.png)](https://www.patreon.com/Wintermance) [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/W7W01UAI9)<br />
 [![Github All Releases](https://img.shields.io/github/downloads/Lyall/FF7RebirthFix/total.svg)](https://github.com/Lyall/FF7RebirthFix/releases)
 
-This is an ASI plugin for for Final Fantasy VII Rebirth that adds ultrawide/narrower support and more.
+This is an ASI plugin for Final Fantasy VII Rebirth that adds ultrawide/narrower support and more.
 
 ## Features
 ### General
