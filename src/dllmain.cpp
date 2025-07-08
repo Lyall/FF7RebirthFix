@@ -54,6 +54,7 @@ bool bFixMovies;
 float fFramerateLimit = 120.00f;
 bool bGlobalFOVMulti;
 float fFOVMulti;
+bool bDynamicFOVChanger;
 bool bAutoVignette;
 float fVignetteStrength;
 float fHUDResScale;
@@ -82,6 +83,16 @@ SDK::UAreaMap_TopBase_C* UMGAreaMap = nullptr;
 SDK::UVR_Top_C* UMGVRTop = nullptr;
 SDK::UBattleTips_C* UMGBattleTips = nullptr;
 SDK::UMainMenu_Top_Window_C* UMGMainMenu = nullptr;
+
+// Function pointers
+std::uint8_t* GameplayFOVScanResult = nullptr;
+std::uint8_t* GameplayFOVAltScanResult = nullptr;
+std::uint8_t* AspectRatioFOVScanResult = nullptr;
+
+SafetyHookMid FOVMidHook{};
+SafetyHookMid AspectRatioMidHook{};
+SafetyHookMid GameplayFOVMidHook{};
+SafetyHookMid GameplayFOVAltMidHook{};
 
 void Logging()
 {
@@ -152,6 +163,7 @@ void Configuration()
     inipp::get_value(ini.sections["Framerate"], "FPS", fFramerateLimit);
     inipp::get_value(ini.sections["FOV"], "Global", bGlobalFOVMulti);
     inipp::get_value(ini.sections["FOV"], "Multiplier", fFOVMulti);
+	inipp::get_value( ini.sections["FOV"], "DynamicChanger", bDynamicFOVChanger );
     inipp::get_value(ini.sections["Subtitles"], "Size", fSubtitleScale);
 
     inipp::get_value(ini.sections["Custom Resolution"], "Width", iCustomResX);
@@ -389,12 +401,17 @@ void CurrentResolution()
 
 void AspectRatioFOV()
 {
+
+    // Aspect ratio / FOV
+    AspectRatioFOVScanResult = Memory::PatternScan( exeModule, "C5 FA ?? ?? ?? 8B ?? ?? ?? ?? ?? 89 ?? ?? 0F B6 ?? ?? ?? ?? ?? 33 ?? ?? 83 ?? 01" );
+
+    // Gameplay FOV
+    GameplayFOVScanResult = Memory::PatternScan( exeModule, "C5 ?? ?? ?? ?? C5 ?? ?? ?? ?? ?? ?? ?? 45 8B ?? 49 8B ?? BE ?? ?? ?? ??" );
+    GameplayFOVAltScanResult = Memory::PatternScan( exeModule, "C4 ?? ?? ?? ?? ?? C4 ?? ?? ?? ?? ?? C4 ?? ?? ?? ?? C4 ?? ?? ?? ?? ?? 41 ?? ?? C5 ?? ?? ?? ?? ?? ?? ?? 45 ?? ?? ?? ?? ?? ??" );
+
     if (bFixAspect || bGlobalFOVMulti) {
-        // Aspect ratio / FOV
-        std::uint8_t* AspectRatioFOVScanResult = Memory::PatternScan(exeModule, "C5 FA ?? ?? ?? 8B ?? ?? ?? ?? ?? 89 ?? ?? 0F B6 ?? ?? ?? ?? ?? 33 ?? ?? 83 ?? 01");
         if (AspectRatioFOVScanResult) {
             spdlog::info("Aspect Ratio/FOV: Address is {:s}+{:x}", sExeName.c_str(), AspectRatioFOVScanResult - (std::uint8_t*)exeModule);
-            static SafetyHookMid FOVMidHook{};
             FOVMidHook = safetyhook::create_mid(AspectRatioFOVScanResult,
                 [](SafetyHookContext& ctx) {
                     // Fix vert- FOV when wider than 16:9
@@ -405,7 +422,6 @@ void AspectRatioFOV()
                         ctx.xmm1.f32[0] *= fFOVMulti;
                 });
 
-            static SafetyHookMid AspectRatioMidHook{};
             AspectRatioMidHook = safetyhook::create_mid(AspectRatioFOVScanResult + 0xB,
                 [](SafetyHookContext& ctx) {
                     if (bFixAspect && !bMovieIsPlaying)
@@ -446,12 +462,9 @@ void AspectRatioFOV()
     }
 
     if (!bGlobalFOVMulti && fFOVMulti != 1.00f) {
-        // Gameplay FOV
-        std::uint8_t* GameplayFOVScanResult = Memory::PatternScan(exeModule, "C5 ?? ?? ?? ?? C5 ?? ?? ?? ?? ?? ?? ?? 45 8B ?? 49 8B ?? BE ?? ?? ?? ??");
-        std::uint8_t* GameplayFOVAltScanResult = Memory::PatternScan(exeModule, "C4 ?? ?? ?? ?? ?? C4 ?? ?? ?? ?? ?? C4 ?? ?? ?? ?? C4 ?? ?? ?? ?? ?? 41 ?? ?? C5 ?? ?? ?? ?? ?? ?? ?? 45 ?? ?? ?? ?? ?? ??");
         if (GameplayFOVScanResult && GameplayFOVAltScanResult) {
             spdlog::info("Gameplay FOV: Address is {:s}+{:x}", sExeName.c_str(), GameplayFOVScanResult - (std::uint8_t*)exeModule);
-            static SafetyHookMid GameplayFOVMidHook{};
+
             GameplayFOVMidHook = safetyhook::create_mid(GameplayFOVScanResult,
                 [](SafetyHookContext& ctx) {
                     if (ctx.r13) {                       
@@ -462,7 +475,6 @@ void AspectRatioFOV()
                 });
 
             spdlog::info("Gameplay FOV: Alt: Address is {:s}+{:x}", sExeName.c_str(), GameplayFOVAltScanResult - (std::uint8_t*)exeModule);
-            static SafetyHookMid GameplayFOVAltMidHook{};
             GameplayFOVAltMidHook = safetyhook::create_mid(GameplayFOVAltScanResult,
                 [](SafetyHookContext& ctx) {
                     if (ctx.r13) {
@@ -1155,6 +1167,137 @@ void Misc()
     */
 }
 
+// Low-level keyboard hook procedure
+LRESULT CALLBACK LowLevelKeyboardProc( int nCode, WPARAM wParam, LPARAM lParam )
+{
+    if (nCode == HC_ACTION && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN))
+    {
+        KBDLLHOOKSTRUCT* pKey = (KBDLLHOOKSTRUCT*)lParam;
+        DWORD vk = pKey->vkCode;
+
+        if (vk == VK_MULTIPLY)
+        {
+            if (!(pKey->flags & KF_REPEAT))
+            {
+                bGlobalFOVMulti = !bGlobalFOVMulti;
+
+				if (bGlobalFOVMulti)
+					spdlog::info( "Global FOV multiplier enabled" );
+				else
+					spdlog::info( "Global FOV multiplier disabled" );
+            }
+        }
+
+        if (vk >= VK_NUMPAD1 && vk <= VK_NUMPAD9)
+        {
+            // Check if the key was previously up (not a repeat)
+            if (!(pKey->flags & KF_REPEAT))
+            {
+                int keyIndex = vk - VK_NUMPAD1;
+                fFOVMulti = 0.6f + (keyIndex) * 0.1f;
+
+				spdlog::info( "FOV multiplier set to {:.1f}", fFOVMulti );
+			}
+        }
+
+        // This list of keys needs to change depending on whatever keys are used to change fov or toggle global fov multiplier (or other features)
+        if ((vk >= VK_NUMPAD1 && vk <= VK_NUMPAD9) ||
+            vk == VK_MULTIPLY)
+        {
+            if (!(pKey->flags & KF_REPEAT))
+            {
+                FOVMidHook.reset();
+                AspectRatioMidHook.reset();
+                GameplayFOVMidHook.reset();
+                GameplayFOVAltMidHook.reset();
+
+                if (bFixAspect || bGlobalFOVMulti)
+                {
+                    if (AspectRatioFOVScanResult)
+                    {
+                        FOVMidHook = safetyhook::create_mid( AspectRatioFOVScanResult,
+                            []( SafetyHookContext& ctx ) {
+                            // Fix vert- FOV when wider than 16:9
+                            if (bFixAspect && fAspectRatio > fNativeAspect)
+                                ctx.xmm1.f32[0] = atanf( tanf( ctx.xmm1.f32[0] * (fPi / 360) ) / fNativeAspect * fAspectRatio ) * (360 / fPi);
+
+                            if (bGlobalFOVMulti)
+                                ctx.xmm1.f32[0] *= fFOVMulti;
+                        } );
+
+                        AspectRatioMidHook = safetyhook::create_mid( AspectRatioFOVScanResult + 0xB,
+                            []( SafetyHookContext& ctx ) {
+                            if (bFixAspect && !bMovieIsPlaying)
+                                ctx.rax = *(uint32_t*)(&fAspectRatio);
+                        } );
+                    }
+                    else
+                    {
+                        spdlog::error( "Aspect Ratio/FOV: Pattern invalid so no FOV changes made." );
+                    }
+                }
+
+                if (!bGlobalFOVMulti && fFOVMulti != 1.00f)
+                {
+                    if (GameplayFOVScanResult && GameplayFOVAltScanResult)
+                    {
+                        GameplayFOVMidHook = safetyhook::create_mid( GameplayFOVScanResult,
+                            []( SafetyHookContext& ctx ) {
+                            if (ctx.r13)
+                            {
+                                auto CamType = static_cast<SDK::EEndCameraOperatorType>(ctx.r13);
+                                if (CamType == SDK::EEndCameraOperatorType::Field || CamType == SDK::EEndCameraOperatorType::Battle)
+                                    ctx.xmm0.f32[0] *= fFOVMulti;
+                            }
+                        } );
+
+                        GameplayFOVAltMidHook = safetyhook::create_mid( GameplayFOVAltScanResult,
+                            []( SafetyHookContext& ctx ) {
+                            if (ctx.r13)
+                            {
+                                auto CamType = static_cast<SDK::EEndCameraOperatorType>(ctx.r13);
+                                if (CamType == SDK::EEndCameraOperatorType::Field || CamType == SDK::EEndCameraOperatorType::Battle)
+                                    ctx.xmm0.f32[0] *= fFOVMulti;
+                            }
+                        } );
+                    }
+                    else
+                    {
+                        spdlog::error( "Gameplay FOV: Pattern(s) invalid so no FOV changes made." );
+                    }
+                }
+            }
+        }
+    }
+    return CallNextHookEx( nullptr, nCode, wParam, lParam );
+}
+
+void FOVChanger()
+{
+    
+    if (!bDynamicFOVChanger)
+    {
+		spdlog::info( "Dynamic FOV Changer: Disabled" );
+		return;
+    }
+
+    HHOOK hHook = SetWindowsHookEx( WH_KEYBOARD_LL, LowLevelKeyboardProc, thisModule, 0 );
+    if (!hHook)
+    {
+        spdlog::error( "Failed to install keyboard hook: {}", GetLastError() );
+        return;
+    }
+
+    MSG msg;
+    while (GetMessage( &msg, nullptr, 0, 0 ) > 0)
+    {
+        TranslateMessage( &msg );
+        DispatchMessage( &msg );
+    }
+
+    UnhookWindowsHookEx( hHook );
+}
+
 DWORD __stdcall Main(void*)
 {
     Logging();
@@ -1165,6 +1308,7 @@ DWORD __stdcall Main(void*)
     HUD();
     Graphics();
     Misc();
+    FOVChanger();
 
     return true;
 }
